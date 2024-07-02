@@ -1,0 +1,22 @@
+#!/usr/bin/env node
+const os = require('os');
+const networkInterfaces = os.networkInterfaces();
+
+function getIPAddress() {
+  for (const interfaceName in networkInterfaces) {
+    const interfaces = networkInterfaces[interfaceName];
+    for (const interface of interfaces) {
+      if (interface.family === 'IPv4' && !interface.internal) {
+        return interface.address;
+      }
+    }
+  }
+  return null;
+}
+
+const ipAddress = getIPAddress();
+if (ipAddress) {
+  console.log(`Your IP address is: ${ipAddress}`);
+} else {
+  console.log('Unable to find the IP address.');
+}
