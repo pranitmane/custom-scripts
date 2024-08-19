@@ -16,7 +16,7 @@ function getIPAddress() {
 
 const ipAddress = getIPAddress();
 if (ipAddress) {
-  console.log(`Your IP address is: ${ipAddress}`);
+  console.log(`${ipAddress}`);
 } else {
   console.log('Unable to find the IP address.');
 }
