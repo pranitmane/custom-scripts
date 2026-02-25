@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+
+EDIT_ID=""
+DELETE_ID=""
+MESSAGE=""
+
+while getopts "m:e:d:" opt; do
+  case $opt in
+    m) MESSAGE="$OPTARG" ;;
+    e) EDIT_ID="$OPTARG" ;;
+    d) DELETE_ID="$OPTARG" ;;
+  esac
+done
+
+SECRET_FILE="$HOME/.mysecrets/tg_bot_pm22.txt"
+
+if [ ! -f "$SECRET_FILE" ]; then
+  echo "ok: false"
+  exit 1
+fi
+
+TG_TOKEN=$(tr -d '[:space:]' < "$SECRET_FILE")
+
+if [ -z "$TG_TOKEN" ]; then
+  echo "ok: false"
+  exit 1
+fi
+
+CHAT_ID="-5088754677"
+API_URL="https://api.telegram.org/bot$TG_TOKEN"
+
+if [ -n "$DELETE_ID" ]; then
+  RESPONSE=$(curl -s -X POST "$API_URL/deleteMessage" \
+    -H "Content-Type: application/json" \
+    -d "{\"chat_id\": $CHAT_ID, \"message_id\": $DELETE_ID}")
+
+  OK_STATUS=$(echo "$RESPONSE" | jq -r '.ok')
+  [ "$OK_STATUS" = "true" ] && echo "ok: true" || echo "ok: false"
+  exit
+fi
+
+if [ -n "$EDIT_ID" ]; then
+  [ -z "$MESSAGE" ] && echo "Usage: pm22 -e <id> -m \"message\"" && exit 1
+
+  RESPONSE=$(curl -s -X POST "$API_URL/editMessageText" \
+    -H "Content-Type: application/json" \
+    -d "{\"chat_id\": $CHAT_ID, \"message_id\": $EDIT_ID, \"text\": \"$MESSAGE\"}")
+else
+  [ -z "$MESSAGE" ] && echo "Usage: pm22 -m \"message\"" && exit 1
+
+  RESPONSE=$(curl -s -X POST "$API_URL/sendMessage" \
+    -H "Content-Type: application/json" \
+    -d "{\"chat_id\": $CHAT_ID, \"text\": \"$MESSAGE\"}")
+fi
+
+OK_STATUS=$(echo "$RESPONSE" | jq -r '.ok')
+
+if [ "$OK_STATUS" = "true" ]; then
+  MESSAGE_ID=$(echo "$RESPONSE" | jq -r '.result.message_id')
+  echo "ok: true | message_id: $MESSAGE_ID"
+else
+  echo "ok: false"
+  exit 1
+fi
