@@ -1,0 +1,50 @@
+#!/usr/bin/env zsh
+
+STORE="$HOME/store.txt"
+[[ -f "$STORE" ]] || touch "$STORE"
+
+case "$1" in
+  add)
+    shift
+    while getopts "m:" opt; do
+      case "$opt" in
+        m)
+          msg="$OPTARG"
+
+          if [[ "$msg" == *$'\n'* ]]; then
+            echo "Error: multiline input not allowed"
+            exit 1
+          fi
+
+          echo "$(date '+%Y-%m-%d %H:%M:%S') | $msg" >> "$STORE"
+          ;;
+      esac
+    done
+    ;;
+    
+  list)
+    if [[ "$2" == "-a" ]]; then
+      cat "$STORE"
+    else
+      tail -n 5 "$STORE"
+    fi
+    ;;
+    
+  search)
+    selected=$(tail -r "$STORE" | fzf --height=40% --reverse --border)
+
+    if [[ -n "$selected" ]]; then
+      text="${selected#*| }"
+      echo -n "$text" | pbcopy
+      echo "Copied: $text"
+    fi
+    ;;
+    
+  *)
+    echo "Usage:"
+    echo "  mem add -m \"text\""
+    echo "  mem list"
+    echo "  mem list -a"
+    echo "  mem search"
+    ;;
+esac
