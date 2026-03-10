@@ -40,11 +40,16 @@ case "$1" in
     fi
     ;;
     
+  edit)
+    vim "$STORE"
+    ;;
+    
   *)
     echo "Usage:"
     echo "  mem add -m \"text\""
     echo "  mem list"
     echo "  mem list -a"
     echo "  mem search"
+    echo "  mem edit"
     ;;
 esac
