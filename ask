@@ -1,0 +1,90 @@
+ask() {
+    local model="anthropic/claude-sonnet-4.5"
+    local use_search=false
+    local use_explain=false
+
+    # --- flag parsing ---
+    while [[ "$1" == -* ]]; do
+        case "$1" in
+            -m) shift
+                case "$1" in
+                    claude) model="anthropic/claude-sonnet-4.5" ;;
+                    gpt4)   model="openai/gpt-4o-mini" ;;
+                    gpt)    model="openai/gpt-3.5-turbo" ;;
+                    *)      model="$1" ;;
+                esac
+                shift ;;
+            -s|--search)  use_search=true;  shift ;;
+            -e|--explain) use_explain=true; shift ;;
+            *) break ;;
+        esac
+    done
+
+    # --- query input ---
+    local query
+    if [[ $# -gt 0 ]]; then
+        query="$*"
+    elif [[ ! -t 0 ]]; then
+        query="$(cat)"
+    else
+        echo "Usage: ask [-s] [-e] [-m model] <question>"
+        echo "       echo <question> | ask"
+        echo ""
+        echo "Flags:"
+        echo "  -m <model>   claude | gpt4 | gpt | or any full model string"
+        echo "  -s           Web search (via Exa, ~\$0.02/req)"
+        echo "  -e           Explain mode — detailed reasoning and gotchas"
+        return 1
+    fi
+
+    # --- append :online to model if search requested ---
+    $use_search && model="${model}:online"
+
+    # --- system prompt ---
+    local base_prompt="You are a concise CLI assistant for an experienced macOS user (macOS 15.3.1, zsh, homebrew, vim). Stack: bash, TypeScript, Node.js, Go. Focus areas: web and infra. If something can be answered with a one-liner command, just give the command — nothing else. No preamble, no sign-off. Output plain markdown with inline code, no walls of text."
+
+    local explain_directive=""
+    $use_explain && explain_directive=" The user wants a thorough explanation this time: walk through the reasoning, flags, and any gotchas."
+
+    local system_prompt="${base_prompt}${explain_directive}"
+
+    # --- build payload ---
+    local payload
+    payload=$(jq -n \
+        --arg q "$query" \
+        --arg m "$model" \
+        --arg s "$system_prompt" \
+        '{
+            model: $m,
+            messages: [
+                {role: "system", content: $s},
+                {role: "user",   content: $q}
+            ]
+        }')
+
+    # --- call api ---
+    local response
+    response=$(curl -s https://openrouter.ai/api/v1/chat/completions \
+        -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+        -H "Content-Type: application/json" \
+        -d "$payload")
+
+    # --- error check ---
+    local error
+    error=$(printf "%s" "$response" | jq -r '.error.message // empty')
+    if [[ -n "$error" ]]; then
+        echo "Error: $error" >&2
+        return 1
+    fi
+
+    # --- render output ---
+    printf "%s" "$response" \
+        | tr -d '\000-\031' \
+        | jq -r '
+            .choices[0].message.content
+            | if type == "string" then .
+              else map(.text) | join("")
+              end
+        ' \
+        | glow -
+}
