@@ -1,8 +1,11 @@
 #!/usr/bin/env zsh
-read -p "Enter the project name: " projectName
-cd ~/Desktop
-mkdir "$projectName"
-cd "$projectName"
+echo -n "Enter the project name: " 
+read projectName
+if [ -d "$projectName" ]; then
+  echo "The directory '$projectName' already exists."
+  exit 1
+fi
+mkdir "$projectName" && cd "$projectName"
 npm init -y && pnpm i -D @types/node typescript
 tsc --init --rootDir "./src" --outDir "./dist" --declaration true
 mkdir dist src

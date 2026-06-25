@@ -1,0 +1,72 @@
+#!/usr/bin/env node
+
+const fs = require("fs");
+const path = require("path");
+const readline = require("readline");
+const { exec } = require("child_process");
+
+// ===== Helper functions =====
+
+function ask(question) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => rl.question(question, (ans) => {
+    rl.close();
+    resolve(ans);
+  }));
+}
+
+function formatDate(input) {
+  if (!input) return new Date().toISOString().split("T")[0];
+
+  const [dd, mm, yyyy] = input.split("/");
+  if (!dd || !mm || !yyyy) {
+    console.error("❌ Invalid date format. Use dd/mm/yyyy");
+    process.exit(1);
+  }
+  return `${yyyy}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`;
+}
+
+function slugify(text) {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+// ===== Main =====
+
+(async () => {
+  const title = await ask("Title: ");
+  const description = await ask("Description: ");
+  const customDate = await ask("Date (dd/mm/yyyy) [press enter for today]: ");
+
+  const date = formatDate(customDate);
+  const slug = slugify(title);
+  const timestamp = Date.now();
+  const filename = `${date}-${slug}--${timestamp}.md`;
+
+  // Get target directory from CLI arg or fallback to ~/notes
+  const targetDir = process.argv[2] || path.join(process.env.HOME || ".", "notes");
+  const filepath = path.join(targetDir, filename);
+
+  const frontmatter = `---
+title: "${title}"
+date: ${date}
+description: "${description}"
+---
+
+# ${title}
+
+`;
+
+  fs.mkdirSync(targetDir, { recursive: true });
+  fs.writeFileSync(filepath, frontmatter, "utf8");
+
+  exec(`nvim ${filepath}`, (err) => {
+    if (err) {
+      console.error("❌ Couldn't open in Vim:", err.message);
+    }
+  });
+})();
+
+

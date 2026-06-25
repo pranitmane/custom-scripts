@@ -1,64 +1,199 @@
 #!/usr/bin/env bash
 
+# pm22 — notify yourself on Telegram from the command line.
+# The contact point for agents/scripts running on this machine to ping your phone.
+
+set -o pipefail
+
+# --- defaults ---
+MESSAGE=""
 EDIT_ID=""
 DELETE_ID=""
-MESSAGE=""
+PHOTO=""
+DOCUMENT=""
+PARSE_MODE=""
+SILENT=false
+QUIET=false
+JSON=false
 
-while getopts "m:e:d:" opt; do
-  case $opt in
-    m) MESSAGE="$OPTARG" ;;
-    e) EDIT_ID="$OPTARG" ;;
-    d) DELETE_ID="$OPTARG" ;;
+usage() {
+  cat <<'EOF'
+pm22 — send yourself a Telegram notification.
+
+Usage:
+  pm22 -m "message"               Send a message
+  echo "build done" | pm22        Send message body from stdin / a pipe
+  pm22 -f photo.png [-m caption]  Send a photo
+  pm22 -D report.pdf [-m caption] Send a file/document
+  pm22 -e <id> -m "new text"      Edit a previously sent message
+  pm22 -d <id>                    Delete a message
+
+Flags:
+  -m, --message <text>   Message text (or caption for -f/-D). Falls back to stdin.
+  -f, --photo <path>     Send an image as a photo
+  -D, --document <path>  Send any file as a document
+  -e, --edit <id>        Edit message <id> (requires -m)
+  -d, --delete <id>      Delete message <id>
+  -p, --parse <mode>     Parse mode: markdown | html  (for rich formatting)
+  -s, --silent           Send without a notification sound
+  -q, --quiet            No output; exit code only (0 ok, non-zero on failure)
+  -j, --json             Emit a structured JSON result instead of human output
+  -h, --help             Show this help
+
+Exit codes:
+  0  success    2  usage error    3  missing/empty token    1  Telegram API error
+
+Token is read from ~/.mysecrets/tg_bot_pm22.txt
+EOF
+}
+
+# --- flag parsing (short + long, matches sibling scripts' style) ---
+while [[ "$1" == -* ]]; do
+  case "$1" in
+    -m|--message)  MESSAGE="$2";   shift 2 ;;
+    -e|--edit)     EDIT_ID="$2";   shift 2 ;;
+    -d|--delete)   DELETE_ID="$2"; shift 2 ;;
+    -f|--photo)    PHOTO="$2";     shift 2 ;;
+    -D|--document) DOCUMENT="$2";  shift 2 ;;
+    -p|--parse)    PARSE_MODE="$2"; shift 2 ;;
+    -s|--silent)   SILENT=true;    shift ;;
+    -q|--quiet)    QUIET=true;     shift ;;
+    -j|--json)     JSON=true;      shift ;;
+    -h|--help)     usage; exit 0 ;;
+    --) shift; break ;;
+    *) echo "pm22: unknown flag: $1" >&2; echo "Try 'pm22 --help'." >&2; exit 2 ;;
   esac
 done
 
+# Allow a bare message argument: pm22 "hello"
+[ -z "$MESSAGE" ] && [ -n "$1" ] && MESSAGE="$*"
+
+# Read message/caption from stdin when none was given and input is piped.
+if [ -z "$MESSAGE" ] && [ ! -t 0 ]; then
+  MESSAGE="$(cat)"
+fi
+
+# --- colors (auto-off when piped, in json/quiet mode, or NO_COLOR set) ---
+if [ -t 1 ] && [ -z "$NO_COLOR" ] && [ "$JSON" = false ] && [ "$QUIET" = false ]; then
+  C_OK=$'\033[32m'; C_ERR=$'\033[31m'; C_DIM=$'\033[2m'; C_RST=$'\033[0m'
+else
+  C_OK=""; C_ERR=""; C_DIM=""; C_RST=""
+fi
+
+# normalize parse mode to Telegram's expected values
+case "$(echo "$PARSE_MODE" | tr '[:upper:]' '[:lower:]')" in
+  "")              PARSE_MODE="" ;;
+  md|markdown)     PARSE_MODE="MarkdownV2" ;;
+  html)            PARSE_MODE="HTML" ;;
+  markdownv2)      PARSE_MODE="MarkdownV2" ;;
+  *) echo "pm22: invalid --parse mode '$PARSE_MODE' (use markdown|html)" >&2; exit 2 ;;
+esac
+
+# --- emit a failure and exit; honours --quiet / --json ---
+fail() {
+  local msg="$1" code="${2:-1}"
+  if [ "$JSON" = true ]; then
+    jq -nc --arg e "$msg" '{ok:false, error:$e}'
+  elif [ "$QUIET" = false ]; then
+    echo "${C_ERR}✗ $msg${C_RST}" >&2
+  fi
+  exit "$code"
+}
+
+# --- emit success; honours --quiet / --json ---
+succeed() {
+  local action="$1" id="$2"
+  if [ "$JSON" = true ]; then
+    if [ -n "$id" ]; then
+      jq -nc --arg a "$action" --argjson id "$id" '{ok:true, action:$a, message_id:$id}'
+    else
+      jq -nc --arg a "$action" '{ok:true, action:$a}'
+    fi
+  elif [ "$QUIET" = false ]; then
+    if [ -n "$id" ]; then
+      echo "${C_OK}✓ ${action}${C_RST} ${C_DIM}message_id: ${id}${C_RST}"
+    else
+      echo "${C_OK}✓ ${action}${C_RST}"
+    fi
+  fi
+  exit 0
+}
+
+# --- token ---
 SECRET_FILE="$HOME/.mysecrets/tg_bot_pm22.txt"
-
-if [ ! -f "$SECRET_FILE" ]; then
-  echo "ok: false"
-  exit 1
-fi
-
+[ -f "$SECRET_FILE" ] || fail "token file not found: $SECRET_FILE" 3
 TG_TOKEN=$(tr -d '[:space:]' < "$SECRET_FILE")
-
-if [ -z "$TG_TOKEN" ]; then
-  echo "ok: false"
-  exit 1
-fi
+[ -n "$TG_TOKEN" ] || fail "token file is empty: $SECRET_FILE" 3
 
 CHAT_ID="-5088754677"
 API_URL="https://api.telegram.org/bot$TG_TOKEN"
 
+# --- pull a human error description out of a Telegram response ---
+tg_error() {
+  echo "$1" | jq -r '.description // "request failed"' 2>/dev/null || echo "request failed"
+}
+
+# ============================ actions ============================
+
+# delete -------------------------------------------------------------
 if [ -n "$DELETE_ID" ]; then
+  PAYLOAD=$(jq -nc --argjson chat "$CHAT_ID" --argjson id "$DELETE_ID" \
+    '{chat_id:$chat, message_id:$id}')
   RESPONSE=$(curl -s -X POST "$API_URL/deleteMessage" \
-    -H "Content-Type: application/json" \
-    -d "{\"chat_id\": $CHAT_ID, \"message_id\": $DELETE_ID}")
-
-  OK_STATUS=$(echo "$RESPONSE" | jq -r '.ok')
-  [ "$OK_STATUS" = "true" ] && echo "ok: true" || echo "ok: false"
-  exit
+    -H "Content-Type: application/json" -d "$PAYLOAD")
+  [ "$(echo "$RESPONSE" | jq -r '.ok')" = "true" ] \
+    && succeed "deleted" "" \
+    || fail "$(tg_error "$RESPONSE")"
 fi
 
+# photo --------------------------------------------------------------
+if [ -n "$PHOTO" ]; then
+  [ -f "$PHOTO" ] || fail "photo not found: $PHOTO" 2
+  ARGS=(-F "chat_id=$CHAT_ID" -F "photo=@$PHOTO")
+  [ -n "$MESSAGE" ]    && ARGS+=(-F "caption=$MESSAGE")
+  [ -n "$PARSE_MODE" ] && ARGS+=(-F "parse_mode=$PARSE_MODE")
+  [ "$SILENT" = true ] && ARGS+=(-F "disable_notification=true")
+  RESPONSE=$(curl -s -X POST "$API_URL/sendPhoto" "${ARGS[@]}")
+  [ "$(echo "$RESPONSE" | jq -r '.ok')" = "true" ] \
+    && succeed "sent photo" "$(echo "$RESPONSE" | jq -r '.result.message_id')" \
+    || fail "$(tg_error "$RESPONSE")"
+fi
+
+# document -----------------------------------------------------------
+if [ -n "$DOCUMENT" ]; then
+  [ -f "$DOCUMENT" ] || fail "document not found: $DOCUMENT" 2
+  ARGS=(-F "chat_id=$CHAT_ID" -F "document=@$DOCUMENT")
+  [ -n "$MESSAGE" ]    && ARGS+=(-F "caption=$MESSAGE")
+  [ -n "$PARSE_MODE" ] && ARGS+=(-F "parse_mode=$PARSE_MODE")
+  [ "$SILENT" = true ] && ARGS+=(-F "disable_notification=true")
+  RESPONSE=$(curl -s -X POST "$API_URL/sendDocument" "${ARGS[@]}")
+  [ "$(echo "$RESPONSE" | jq -r '.ok')" = "true" ] \
+    && succeed "sent file" "$(echo "$RESPONSE" | jq -r '.result.message_id')" \
+    || fail "$(tg_error "$RESPONSE")"
+fi
+
+# edit ---------------------------------------------------------------
 if [ -n "$EDIT_ID" ]; then
-  [ -z "$MESSAGE" ] && echo "Usage: pm22 -e <id> -m \"message\"" && exit 1
-
+  [ -n "$MESSAGE" ] || fail "edit requires a message: pm22 -e <id> -m \"text\"" 2
+  PAYLOAD=$(jq -nc --argjson chat "$CHAT_ID" --argjson id "$EDIT_ID" \
+    --arg text "$MESSAGE" --arg pm "$PARSE_MODE" \
+    '{chat_id:$chat, message_id:$id, text:$text} + (if $pm=="" then {} else {parse_mode:$pm} end)')
   RESPONSE=$(curl -s -X POST "$API_URL/editMessageText" \
-    -H "Content-Type: application/json" \
-    -d "{\"chat_id\": $CHAT_ID, \"message_id\": $EDIT_ID, \"text\": \"$MESSAGE\"}")
-else
-  [ -z "$MESSAGE" ] && echo "Usage: pm22 -m \"message\"" && exit 1
-
-  RESPONSE=$(curl -s -X POST "$API_URL/sendMessage" \
-    -H "Content-Type: application/json" \
-    -d "{\"chat_id\": $CHAT_ID, \"text\": \"$MESSAGE\"}")
+    -H "Content-Type: application/json" -d "$PAYLOAD")
+  [ "$(echo "$RESPONSE" | jq -r '.ok')" = "true" ] \
+    && succeed "edited" "$(echo "$RESPONSE" | jq -r '.result.message_id')" \
+    || fail "$(tg_error "$RESPONSE")"
 fi
 
-OK_STATUS=$(echo "$RESPONSE" | jq -r '.ok')
+# send (default) -----------------------------------------------------
+[ -n "$MESSAGE" ] || { usage >&2; exit 2; }
 
-if [ "$OK_STATUS" = "true" ]; then
-  MESSAGE_ID=$(echo "$RESPONSE" | jq -r '.result.message_id')
-  echo "ok: true | message_id: $MESSAGE_ID"
-else
-  echo "ok: false"
-  exit 1
-fi
+PAYLOAD=$(jq -nc --argjson chat "$CHAT_ID" --arg text "$MESSAGE" \
+  --arg pm "$PARSE_MODE" --argjson silent "$SILENT" \
+  '{chat_id:$chat, text:$text, disable_notification:$silent}
+   + (if $pm=="" then {} else {parse_mode:$pm} end)')
+RESPONSE=$(curl -s -X POST "$API_URL/sendMessage" \
+  -H "Content-Type: application/json" -d "$PAYLOAD")
+[ "$(echo "$RESPONSE" | jq -r '.ok')" = "true" ] \
+  && succeed "sent" "$(echo "$RESPONSE" | jq -r '.result.message_id')" \
+  || fail "$(tg_error "$RESPONSE")"
